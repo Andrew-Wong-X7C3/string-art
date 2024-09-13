@@ -1,3 +1,5 @@
+import os
+from tqdm import tqdm
 from PIL import Image
 
 import numpy as np
@@ -12,12 +14,6 @@ from torch.autograd import Variable
 import faiss
 from sklearn.neighbors import KDTree
 from fast_colorthief import get_palette
-
-from tqdm import tqdm
-
-# from DIS_model.isnet import ISNetDIS
-# from DIS_model.isnet_data_loader import normalize, im_preprocess
-
 
 
 class PreProcessManager:
@@ -80,7 +76,7 @@ class PreProcessManager:
     # ====================================================================================
     # function to reduce color space to n colors
     # ====================================================================================
-    def reduce_colors(self, num_colors):
+    def reduce_colors(self, num_colors, output_folder):
 
         # copy variables
         print('Reducing Colors...')
@@ -119,6 +115,7 @@ class PreProcessManager:
         # return pallette and reduced image
         self.palette = palette
         self.img = clustered_img
+        np.savetxt(os.path.join(output_folder, 'palette.txt'), self.palette, fmt='%f')
         print('Done')
 
 
@@ -155,13 +152,14 @@ class PreProcessManager:
         dithered_img = img.copy()
         total = (dithered_img.shape[0] - 2) * (dithered_img.shape[1] - 2)
 
-        print('Assigning Pixels...')
+        print('\tAssigning Pixels...')
         with ProgressBar(total=total) as progress:
             dithered_img = dither_helper(dithered_img, progress)
 
         # return results
         self.img = dithered_img
         print('Done')
+
 
     # ====================================================================================
     # function to up-scale image with nearest neighbor interpolation
