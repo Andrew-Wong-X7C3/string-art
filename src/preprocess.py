@@ -3,13 +3,9 @@ from tqdm import tqdm
 from PIL import Image
 
 import numpy as np
+import scipy as sp
 from numba import jit
 from numba_progress import ProgressBar
-
-import torch
-import torch.nn.functional as F
-from torchvision import transforms
-from torch.autograd import Variable
 
 import faiss
 from sklearn.neighbors import KDTree
@@ -35,6 +31,51 @@ class PreProcessManager:
         img = img.resize(dim, Image.LANCZOS)
         img = np.array(img) / 255
         self.img = img
+        print('Done')
+
+
+    # ====================================================================================
+    # function to identify edges using 2D Gaussian derivative
+    # ====================================================================================
+    def gaussian_edge(self, sigma):
+
+        # copy variables
+        print('Applying Gaussian Edge Detection...')
+        img = self.img.copy()
+
+        # helper function to calculate 2D Gaussian derivative
+        def gaussDeriv2D(sigma):
+            Gx = np.zeros((6 * sigma + 1, 6 * sigma + 1))
+            mask_range = np.arange(int(-np.ceil(3 * sigma)), int(np.ceil(3 * sigma)) + 1)
+            for iy, ix in np.ndindex(Gx.shape):
+                x = mask_range[ix]
+                y = mask_range[iy]
+                c = 1 / (2 * np.pi * np.power(sigma, 4))
+                exp = -(np.power(x, 2) + np.power(y, 2)) / (2 * np.power(sigma, 2))
+                Gx[iy, ix] = -x * c * np.exp(exp)
+            return Gx, Gx.T
+
+        # helper function to convert to gray scale
+        def rgb2gray(rgb):
+            return np.dot(rgb[...,:3], [0.2989, 0.5870, 0.1140])
+
+
+        # apply filter per RGB channel
+        Gx, Gy = gaussDeriv2D(sigma)
+        filtered_img = np.zeros(img.shape)
+        for channel in tqdm(range(img.shape[-1])):
+            layer = img[:, :, channel]
+            gx_img = sp.ndimage.convolve(layer, Gx, mode='nearest')
+            gy_img = sp.ndimage.convolve(layer, Gy, mode='nearest')
+            filtered_img[:, :, channel] = np.sqrt(np.power(gx_img, 2) + np.power(gy_img, 2))
+
+        # mask image
+        mask = rgb2gray(filtered_img)
+        mask = mask > np.mean(mask)
+        edge_img = np.where(mask[..., None], img, 0)
+
+        # return results
+        self.img = edge_img
         print('Done')
 
 

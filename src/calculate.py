@@ -9,6 +9,7 @@ class CalculateManager:
         self.cc_map = None
         self.vl_map = None
         self.length_map = None
+        self.normalizer_map = None
 
         self.color_weights = None
         self.img_encoding = None
@@ -37,6 +38,7 @@ class CalculateManager:
         cc_map = np.zeros((num_points, num_points, max_length), dtype=np.int16)
         vl_map = np.zeros((num_points, num_points, max_length), dtype=np.float16)
         length_map = np.zeros((num_points, num_points), dtype=np.int16)
+        normalizer_map = np.zeros((num_points, num_points), dtype=np.int16)
 
         # calculate all possible anti-aliased lines using Bresenham's algorithm
         print('Calculating Intersection Using Bresenham\'s Algorithm...')
@@ -45,9 +47,14 @@ class CalculateManager:
                 if p2 <= p1:
 
                     rr, cc, vl = line_aa(pins[0][p1], pins[1][p1], pins[0][p2], pins[1][p2])
+                    
                     length = vl.shape[0]
                     length_map[p1, p2] = length
                     length_map[p2, p1] = length
+                    
+                    normalizer = np.sum(vl)
+                    normalizer_map[p1, p2] = normalizer
+                    normalizer_map[p2, p1] = normalizer
 
                     rr_map = update_map(rr_map, length, rr, p1, p2)
                     cc_map = update_map(cc_map, length, cc, p1, p2)
@@ -58,6 +65,7 @@ class CalculateManager:
         self.cc_map = cc_map
         self.vl_map = vl_map
         self.length_map = length_map
+        self.normalizer_map = normalizer_map
         print('Done')
 
 

@@ -1,3 +1,5 @@
+const NUM_POINTS = 180;
+
 // function to load txt data
 async function load_data(path) {
     var response = await fetch(path);
@@ -84,24 +86,23 @@ async function main() {
     var palette = await load_data('results/palette.txt');
 
     // calculate pin locations
-    var num_points = 256;
-    var theta = 2 * Math.PI / num_points;
-    var points = [...Array(num_points)].map((_, i) => [Math.sin(theta * i), -Math.cos(theta * i)])
+    var theta = 2 * Math.PI / NUM_POINTS;
+    var points = [...Array(NUM_POINTS)].map((_, i) => [Math.sin(theta * i), -Math.cos(theta * i)])
 
     // create lines
     var lines = [];
     var p1, p2, ic;
     for (let i = 0; i < path.length; i++) {
         [p1, p2, ic] = path[i];
-        lines.push(createLine(points[p1], points[p2], palette[ic], 0.25));
+        lines.push(createLine(points[p1], points[p2], palette[ic], 0.15));
     }
 
     // setup scene
     var scene, camera, renderer;
     [scene, camera, renderer] = sceneSetup();
 
-    lines.map(line => scene.add(line))
-    // drawLines(lines, scene);
+    // lines.map(line => scene.add(line))
+    drawLines(lines, scene);
     animate(scene, camera, renderer);
 }
 main();

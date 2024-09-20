@@ -1,4 +1,3 @@
-
 import os
 import math
 import numpy as np
@@ -18,8 +17,9 @@ def reset_search_map(search_map):
 
     '''
     Assign work as follows:
-        - block.x = pin 2 index to reset
+        - block.x = pin 2 index
         - thread.x = color index
+        NOTE: assume colors < 1024 and points < 1024
     '''
     block_idx = cuda.blockIdx.x 
     thread_idx = cuda.threadIdx.x
@@ -34,7 +34,10 @@ def reset_search_map(search_map):
 # function to calculate benefit from all possible connections
 # ====================================================================================
 @cuda.jit
-def greedy_search(search_map, rr_map, cc_map, vl_map, length_map, img_encoding, canvas_encoding, connection_encoding, color_weights, temporal_weights, p1):
+def greedy_search(search_map, rr_map, cc_map, vl_map, length_map, normalizer_map,
+                  img_encoding, canvas_encoding, connection_encoding,
+                  color_weights, temporal_weights,
+                  p1):
 
     '''
     Assign work as follows:
@@ -42,19 +45,20 @@ def greedy_search(search_map, rr_map, cc_map, vl_map, length_map, img_encoding, 
         - block.x = color index
         - thread.x = worker to sum line
         NOTE: cannot convert encoding data to shared array due to size
+        NOTE: assume colors < 1024
     '''
     block_idy = cuda.blockIdx.y
     block_idx = cuda.blockIdx.x
     thread_idx = cuda.threadIdx.x
 
-    # pre-load shared data
+    # pre-load shared data for each block
     s_color_weights = cuda.shared.array((NUM_COLORS), dtype=float32)
     s_temporal_weights = cuda.shared.array((NUM_COLORS), dtype=float32)
 
-    if block_idx == 0:
-        if thread_idx < NUM_COLORS:
-            s_color_weights[thread_idx] = color_weights[thread_idx]
-            s_temporal_weights[thread_idx] = temporal_weights[thread_idx]
+    if thread_idx < NUM_COLORS:
+        s_color_weights[thread_idx] = color_weights[thread_idx]
+        s_temporal_weights[thread_idx] = temporal_weights[thread_idx]
+    cuda.syncthreads()
 
     # loop-stride pins
     p2 = block_idy
@@ -67,31 +71,36 @@ def greedy_search(search_map, rr_map, cc_map, vl_map, length_map, img_encoding, 
             # get intersecting pixels
             p1_val = int(p1[ic])
             length = length_map[p1_val, p2]
+            normalizer = normalizer_map[p1_val, p2]
+
             rr = rr_map[p1_val, p2][:length]
             cc = cc_map[p1_val, p2][:length]
             vl = vl_map[p1_val, p2][:length]
 
             # check for invalid connection
-            if connection_encoding[p1_val, p2, ic] == 1:
-                return
-            if p1_val == p2:
+            if (connection_encoding[p1_val, p2, ic] == 1) or (p1_val == p2):
+                search_map[p2, ic] = -math.inf
                 return
 
             # loop-stride length of pixel coordinates
             ix = thread_idx
             while ix < length:
                 
-                # check if pixel should be updated by line
-                img_pixel = img_encoding[rr[ix], cc[ix]]
-                canvas_pixel = canvas_encoding[rr[ix], cc[ix]]
+                # get corresponding encoding pixels
+                img_pixel = int(img_encoding[rr[ix], cc[ix]])
+                canvas_pixel = int(canvas_encoding[rr[ix], cc[ix]])
 
-                if (img_pixel == ic) and (canvas_pixel != ic):
-                    benefit = vl[ix] * (s_color_weights[ic] * s_temporal_weights[ic]) / length
+                # incorrect canvas color, should be drawn over
+                if (img_pixel != canvas_pixel) and (img_pixel == ic):
+                    benefit = vl[ix] * (s_color_weights[ic] * s_temporal_weights[ic]) / normalizer
                     cuda.atomic.add(search_map, (p2, ic), benefit)
-                if (img_pixel != ic):
-                    penalty = -vl[ix] * (1 / s_color_weights[ic]) / length
+
+                # correct canvas color, should not be drawn over
+                if (img_pixel == canvas_pixel) and (img_pixel != ic):
+                    # penalty = -vl[ix] * (1 / s_color_weights[ic]) / normalizer
+                    penalty = -vl[ix] * s_color_weights[img_pixel] / normalizer
                     cuda.atomic.add(search_map, (p2, ic), penalty)
-                
+
                 ix += cuda.blockDim.x
             ic += cuda.gridDim.x
         p2 += cuda.gridDim.y
@@ -101,7 +110,7 @@ def greedy_search(search_map, rr_map, cc_map, vl_map, length_map, img_encoding, 
 # function to calculate argmax to determine optimal line parameters
 # ====================================================================================
 @cuda.jit
-def argmax_reduction(search_map, benefit, p2, ic):
+def argmax_reduction(search_map, benefit, p2, ic, counter):
 
     '''
     Assign work as follows:
@@ -114,15 +123,16 @@ def argmax_reduction(search_map, benefit, p2, ic):
     thread_idx = cuda.threadIdx.x
 
     # perform atomic max and sync
+    counter_val = int(counter[0])
     if block_idx < NUM_COLORS:
         if thread_idx < NUM_POINTS:
-            cuda.atomic.max(benefit, 0, search_map[thread_idx, block_idx])
+            cuda.atomic.max(benefit, counter_val, search_map[thread_idx, block_idx])
     cuda.syncthreads()
 
     # store argmax results
     if block_idx < NUM_COLORS:
         if thread_idx < NUM_POINTS:
-            if search_map[thread_idx, block_idx] == benefit[0]:
+            if search_map[thread_idx, block_idx] == benefit[counter_val]:
                 p2[0] = thread_idx
                 ic[0] = block_idx
 
@@ -136,6 +146,7 @@ def draw_line(rr_map, cc_map, vl_map, length_map, canvas_encoding, p1, p2, ic):
     '''
     Assign work as follows:
         - idx = index in line spanning from pin 1 to pin 2
+        NOTE: assume length < 1024 * 1024
     '''
     block_idx = cuda.blockIdx.x
     block_dim = cuda.blockDim.x
@@ -152,7 +163,7 @@ def draw_line(rr_map, cc_map, vl_map, length_map, canvas_encoding, p1, p2, ic):
     cc = cc_map[p1_val, p2_val][:length]
     vl = vl_map[p1_val, p2_val][:length]
 
-    # update image assuming length less than 1024 * 1024
+    # update image
     if idx < length:
         canvas_encoding[rr[idx], cc[idx]] = ic_val
 
@@ -161,7 +172,7 @@ def draw_line(rr_map, cc_map, vl_map, length_map, canvas_encoding, p1, p2, ic):
 # function to update search variables with new line
 # ====================================================================================
 @cuda.jit(fastmath=True)
-def update_arrays(temporal_weights, color_weights, path, connection_encoding, benefit, p1, p2, ic, counter):
+def update_arrays(temporal_weights, color_weights, path, connection_encoding, p1, p2, ic, counter):
 
     '''
     Assign work as follows:
@@ -185,28 +196,22 @@ def update_arrays(temporal_weights, color_weights, path, connection_encoding, be
             path[counter_val] = (p1_val, p2_val, ic_val)
             connection_encoding[p1_val, p2_val, ic_val] = 1
 
-            # update pins, reset benefit, and increment counter
-            p1[ic_val] = p2[0]
-            p2[0] = 0
-            benefit[0] = 0
+            # update pins and increment counter
+            p1[ic_val] = p2_val
             counter[0] += 1
 
-    # update temporal weights: (2 - (i/N) ^ (1 / ln(w+1)))
+    # update temporal weights
     if thread_idx < NUM_COLORS:
-        # temporal_weights[thread_idx] = 1 * (
-        #                                 2 + 
-        #                                     math.pow(
-        #                                         (color_weights[thread_idx] * counter_val) / NUM_LINES,
-        #                                         1 / (color_weights[thread_idx] * math.log(color_weights[thread_idx] + 1))
-        #                                     )
-        #                                 )
-        temporal_weights[thread_idx] = 1 * (
-                                        2 - 
-                                            math.pow(
-                                                (color_weights[thread_idx] * counter_val) / NUM_LINES,
-                                                1 / (color_weights[thread_idx] * math.log(color_weights[thread_idx] + 1))
-                                            )
-                                        )
+        temporal_weights[thread_idx] = \
+            math.pow(
+                2 - 
+                math.pow(
+                    counter_val / NUM_LINES,
+                    1 / (counter_val * math.log(color_weights[thread_idx] + 1))
+                ),
+                math.log(color_weights[thread_idx] + 1)
+            )
+        
     cuda.syncthreads()
     if thread_idx == 0:
         pass
@@ -225,6 +230,7 @@ class SearchManager:
         self.cc_map = None
         self.vl_map = None
         self.length_map = None
+        self.normalizer_map = None
 
         self.img_encoding = None
         self.canvas_encoding = None
@@ -258,13 +264,14 @@ class SearchManager:
     # ====================================================================================
     # function to load arrays onto GPU shared memory
     # ====================================================================================
-    def create_GPU_objects(self, img_dim, rr_map, cc_map, vl_map, length_map, img_encoding, color_weights):
+    def create_GPU_objects(self, img_dim, rr_map, cc_map, vl_map, length_map, normalizer_map, img_encoding, color_weights):
 
         print('Creating GPU Arrays...')
         self.rr_map = cuda.to_device(rr_map)
         self.cc_map = cuda.to_device(cc_map)
         self.vl_map = cuda.to_device(vl_map)
         self.length_map = cuda.to_device(length_map)
+        self.normalizer_map = cuda.to_device(normalizer_map)
 
         self.img_encoding = cuda.to_device(img_encoding)
         self.canvas_encoding = cuda.to_device(-np.ones((img_dim, img_dim)))
@@ -277,7 +284,7 @@ class SearchManager:
         self.connection_encoding = cuda.to_device(np.zeros((NUM_POINTS, NUM_POINTS, NUM_COLORS)))
 
         self.counter = cuda.to_device(np.zeros(1))
-        self.benefit = cuda.to_device(np.zeros(1))
+        self.benefit = cuda.to_device(-np.inf * np.ones(NUM_LINES))
         self.p1 = cuda.to_device(np.zeros(NUM_COLORS))
         self.p2 = cuda.to_device(np.zeros(1))
         self.ic = cuda.to_device(np.zeros(1))
@@ -290,13 +297,16 @@ class SearchManager:
     def reset_search_map(self):
         reset_search_map[1024, 1024](self.search_map)
     def greedy_search(self):
-        greedy_search[(128, 8), 1024](self.search_map, self.rr_map, self.cc_map, self.vl_map, self.length_map, self.img_encoding, self.canvas_encoding, self.connection_encoding, self.color_weights, self.temporal_weights, self.p1)
+        greedy_search[(8, 128), 1024](self.search_map, self.rr_map, self.cc_map, self.vl_map, self.length_map, self.normalizer_map,
+                                      self.img_encoding, self.canvas_encoding, self.connection_encoding,
+                                      self.color_weights, self.temporal_weights,
+                                      self.p1)
     def argmax_reduction(self):
-        argmax_reduction[1024, 1024](self.search_map, self.benefit, self.p2, self.ic)
+        argmax_reduction[1024, 1024](self.search_map, self.benefit, self.p2, self.ic, self.counter)
     def draw_line(self):
         draw_line[1024, 1024](self.rr_map, self.cc_map, self.vl_map, self.length_map, self.canvas_encoding, self.p1, self.p2, self.ic)
     def update_arrays(self):
-        update_arrays[1, 1024](self.temporal_weights, self.color_weights, self.path, self.connection_encoding, self.benefit, self.p1, self.p2, self.ic, self.counter)
+        update_arrays[1, 1024](self.temporal_weights, self.color_weights, self.path, self.connection_encoding, self.p1, self.p2, self.ic, self.counter)
 
 
     # ====================================================================================
@@ -304,14 +314,22 @@ class SearchManager:
     # ====================================================================================
     def iterate(self):
 
+        temp = np.zeros((NUM_LINES, NUM_COLORS))
+
         print('Drawing Lines...')
         for self.i in tqdm(range(NUM_LINES)):
             self.reset_search_map()
             self.greedy_search()
+
+            x = self.search_map.copy_to_host()
+            temp[self.i] = np.max(x, axis=0)
+
             self.argmax_reduction()
             self.draw_line()
             self.update_arrays()
         print('Done')
+
+        np.savetxt('temp.txt', temp, fmt='%f')
 
 
     # ====================================================================================
@@ -330,6 +348,7 @@ class SearchManager:
         self.string_img = string_img
         plt.imsave(os.path.join(output_folder, 'string_{}_{}_{}.jpg'.format(NUM_COLORS, NUM_POINTS, NUM_LINES)), self.string_img)
         np.savetxt(os.path.join(output_folder, 'path.txt'), self.path.copy_to_host(), fmt='%d')
+        np.savetxt(os.path.join(output_folder, 'benefit.txt'), self.benefit.copy_to_host(), fmt='%f')
         print('Done...')
 
 
