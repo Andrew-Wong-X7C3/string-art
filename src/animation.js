@@ -1,4 +1,4 @@
-const NUM_POINTS = 180;
+const NUM_POINTS = 256;
 
 // function to load txt data
 async function load_data(path) {

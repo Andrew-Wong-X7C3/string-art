@@ -15,6 +15,7 @@ from fast_colorthief import get_palette
 class PreProcessManager:
     def __init__(self):
         self.img = None
+        self.edge = None
         self.radius = 0
         self.palette = None
 
@@ -62,20 +63,20 @@ class PreProcessManager:
 
         # apply filter per RGB channel
         Gx, Gy = gaussDeriv2D(sigma)
-        filtered_img = np.zeros(img.shape)
+        edge_img = np.zeros(img.shape)
         for channel in tqdm(range(img.shape[-1])):
             layer = img[:, :, channel]
             gx_img = sp.ndimage.convolve(layer, Gx, mode='nearest')
             gy_img = sp.ndimage.convolve(layer, Gy, mode='nearest')
-            filtered_img[:, :, channel] = np.sqrt(np.power(gx_img, 2) + np.power(gy_img, 2))
+            edge_img[:, :, channel] = np.sqrt(np.power(gx_img, 2) + np.power(gy_img, 2))
 
-        # mask image
-        mask = rgb2gray(filtered_img)
-        mask = mask > np.mean(mask)
-        edge_img = np.where(mask[..., None], img, 0)
+        # normalize, convert to grayscale, and clip to 1 std
+        edge_img /= np.max(edge_img)
+        edge_img = rgb2gray(edge_img)
+        edge_img[edge_img < np.mean(edge_img) + np.std(edge_img)] = 0
 
         # return results
-        self.img = edge_img
+        self.edge = edge_img
         print('Done')
 
 
@@ -87,6 +88,7 @@ class PreProcessManager:
         # calculate radius
         print('Cropping Image...')
         img = self.img.copy()
+        edge = self.edge.copy()
         radius = int(np.min(img.shape[:2]) * coverage / 2)
 
         # create binary 2D mask
@@ -99,18 +101,24 @@ class PreProcessManager:
         mask = np.sqrt(np.power(x_tile, 2) + np.power(y_tile, 2)) < radius
 
         # apply mask to image and crop
-        cropped_img = np.where(mask[..., None], img, 1)
         x_edge = int((img.shape[1] - 2 * radius) / 2)
         y_edge = int((img.shape[0] - 2 * radius) / 2)
+        
+        cropped_img = np.where(mask[..., None], img, 1)
         cropped_img = cropped_img[y_edge + offset_y:-y_edge + offset_y, x_edge + offset_x:-x_edge + offset_x, :]
+
+        cropped_edge = np.where(mask, edge, 1)
+        cropped_edge = cropped_edge[y_edge + offset_y:-y_edge + offset_y, x_edge + offset_x:-x_edge + offset_x]
 
         # account for rounding error and force equal dimensions
         dim = np.min(cropped_img.shape[:-1])
         cropped_img = cropped_img[:dim, :dim]
+        cropped_edge = cropped_edge[:dim, :dim]
 
-        # return mask and image
+        # return radius and image
         self.radius = radius
         self.img = cropped_img
+        self.edge = cropped_edge
         print('Done')
 
 
@@ -208,18 +216,25 @@ class PreProcessManager:
     def resize_canvas(self, choices, max_dimension):
 
         # copy variables
-        print('Resizing Canvas...')
+        print('Resizing to Max Dimension...')
         img = self.img.copy()
+        edge = self.edge.copy()
         radius = self.radius
         palette = self.palette
 
-        # upscale image using nearest neighbor
-        resized_img = Image.fromarray(np.uint8(img * 255))
-        ratio = max_dimension / np.max(resized_img.size)
-        resized_radius = int(radius * ratio)
-        dim = (np.array(resized_img.size) * ratio).astype(int)
-        resized_img = resized_img.resize(dim, Image.NEAREST)
-        resized_img = np.array(resized_img) / 255
+        def resize(x):
+            resized = Image.fromarray(np.uint8(x * 255))
+            ratio = max_dimension / np.max(resized.size)
+            resized_radius = int(radius * ratio)
+            dim = (np.array(resized.size) * ratio).astype(int)
+            resized = resized.resize(dim, Image.NEAREST)
+            resized = np.array(resized) / 255
+            return resized, resized_radius
+
+        # upscale edges
+        print('\tResizing Edges and Canvas...')
+        resized_edge, _ = resize(edge)
+        resized_img, resized_radius = resize(img)
 
         # perform monte carlo simulation to get new up-scaled palette due to rounding error from uint conversion
         print('\tCollecting Monte Carlo Palette...')
@@ -235,7 +250,8 @@ class PreProcessManager:
             resized_img[(resized_img == resized_colors[I[i][0]]).all(axis=2)] = palette[i]
         
         # return new radius and image
-        self.radius = resized_radius
         self.img = resized_img
+        self.edge = resized_edge
+        self.radius = resized_radius
         print('Done')
 
