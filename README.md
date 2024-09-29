@@ -1,4 +1,4 @@
-# Dice Art Generator
+# String Art Generator
 Andrew Wong <br>
 Wong.816@osu.edu
 
